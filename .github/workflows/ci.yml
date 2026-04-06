@@ -1,0 +1,86 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ${{ secrets.POSTGRES_USER }} -d ${{ secrets.POSTGRES_DB }}"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+      DEBUG: "True"
+      DJANGO_LOGLEVEL: info
+      DJANGO_ALLOWED_HOSTS: localhost 127.0.0.1
+      DATABASE_ENGINE: postgresql_psycopg2
+      DATABASE_NAME: ${{ secrets.POSTGRES_DB }}
+      DATABASE_USERNAME: ${{ secrets.POSTGRES_USER }}
+      DATABASE_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      DATABASE_HOST: localhost
+      DATABASE_PORT: 5432
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/django-postgres-docker
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install gunicorn psycopg2-binary
+
+      - name: Run Django checks
+        run: python manage.py check
+
+      - name: Run database migrations
+        run: python manage.py migrate
+
+      - name: Start app for sanity check
+        run: |
+          nohup python manage.py runserver 0.0.0.0:8000 > server.log 2>&1 &
+          sleep 15
+
+      - name: Sanity check
+        run: |
+          curl -f http://127.0.0.1:8000 || (cat server.log && exit 1)
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t $IMAGE_NAME:${{ github.sha }} .
+          docker tag $IMAGE_NAME:${{ github.sha }} $IMAGE_NAME:latest
+
+      - name: Push Docker image
+        run: |
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest
