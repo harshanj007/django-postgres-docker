@@ -1,0 +1,58 @@
+name: CD Pipeline
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: self-hosted
+
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/django-postgres-docker:latest
+      DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+      POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+      POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Create deploy environment file
+        run: |
+          cat > .env.deploy <<EOF
+          IMAGE_NAME=$IMAGE_NAME
+          DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
+          POSTGRES_DB=$POSTGRES_DB
+          POSTGRES_USER=$POSTGRES_USER
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          EOF
+
+      - name: Stop old deployment
+        run: docker compose --env-file .env.deploy -f docker-compose.deploy.yml down || true
+
+      - name: Pull latest image
+        run: docker pull $IMAGE_NAME
+
+      - name: Deploy app and database
+        run: docker compose --env-file .env.deploy -f docker-compose.deploy.yml up -d
+
+      - name: Wait for application
+        run: sleep 20
+
+      - name: Sanity check after deployment
+        run: curl -f http://127.0.0.1:8000
+
+      - name: Show running containers
+        run: docker ps
